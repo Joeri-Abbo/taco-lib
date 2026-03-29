@@ -503,6 +503,7 @@ func UpdateMultiSource(ctx context.Context, cache *Cache, sources []SourceFetche
 	for range sources {
 		r := <-results
 		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "\nwarning: source %s failed: %v\n", r.name, r.err)
 			continue
 		}
 		sourceEntries[r.name] = r.entries

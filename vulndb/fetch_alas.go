@@ -1,8 +1,9 @@
 package vulndb
 
 import (
+	"compress/gzip"
 	"context"
-	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,75 +11,92 @@ import (
 	"time"
 )
 
-const alasBaseURL = "https://alas.aws.amazon.com"
-
-// ALASFetcher downloads vulnerability data from Amazon Linux Security Advisories.
+// ALASFetcher downloads vulnerability data from Amazon Linux Security Advisories
+// via the YUM repository updateinfo.xml metadata.
 type ALASFetcher struct {
 	HTTPClient *http.Client
-	BaseURL    string
 }
 
 var _ SourceFetcher = (*ALASFetcher)(nil)
 
 func NewALASFetcher() *ALASFetcher {
 	return &ALASFetcher{
-		HTTPClient: &http.Client{Timeout: 60 * time.Second},
-		BaseURL:    alasBaseURL,
+		HTTPClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
 func (f *ALASFetcher) Name() SourceName { return SourceALAS }
 
-// alasVersions are the Amazon Linux versions to fetch.
-var alasVersions = []struct {
-	name    string
-	feedURL string
+// alasRepos are the Amazon Linux YUM repo updateinfo URLs.
+var alasRepos = []struct {
+	name string
+	url  string
 }{
-	{"AL2", "/AL2/alas.json"},
-	{"AL2023", "/AL2023/alas.json"},
+	{"AL2", "https://cdn.amazonlinux.com/2/core/latest/x86_64/mirror.list"},
+	{"AL2023", "https://cdn.amazonlinux.com/al2023/core/mirrors/latest/x86_64/mirror.list"},
 }
 
-type alasFeed struct {
-	Advisories []alasAdvisory `json:"advisories"`
+// updateInfo is the XML structure of YUM updateinfo.xml.
+type updateInfo struct {
+	Updates []updateInfoUpdate `xml:"update"`
 }
 
-type alasAdvisory struct {
-	ID          string   `json:"id"`
-	Severity    string   `json:"severity"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	CVEs        []string `json:"cves"`
-	Packages    []alasPkg `json:"packages"`
-	References  []string `json:"references"`
-	IssuedDate  string   `json:"issued_date"`
+type updateInfoUpdate struct {
+	Type        string                  `xml:"type,attr"`
+	ID          string                  `xml:"id"`
+	Title       string                  `xml:"title"`
+	Severity    string                  `xml:"severity"`
+	Description string                  `xml:"description"`
+	References  updateInfoRefs          `xml:"references"`
+	Packages    updateInfoPackageList   `xml:"pkglist"`
 }
 
-type alasPkg struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Release string `json:"release"`
-	Arch    string `json:"arch"`
+type updateInfoRefs struct {
+	Refs []updateInfoRef `xml:"reference"`
+}
+
+type updateInfoRef struct {
+	Type  string `xml:"type,attr"`
+	Href  string `xml:"href,attr"`
+	ID    string `xml:"id,attr"`
+	Title string `xml:"title,attr"`
+}
+
+type updateInfoPackageList struct {
+	Collections []updateInfoCollection `xml:"collection"`
+}
+
+type updateInfoCollection struct {
+	Packages []updateInfoPkg `xml:"package"`
+}
+
+type updateInfoPkg struct {
+	Name    string `xml:"name,attr"`
+	Version string `xml:"version,attr"`
+	Release string `xml:"release,attr"`
+	Arch    string `xml:"arch,attr"`
+	Epoch   string `xml:"epoch,attr"`
 }
 
 func (f *ALASFetcher) FetchAll(ctx context.Context, progressFn func(fetched, total int)) ([]DBEntry, error) {
 	var allEntries []DBEntry
 
-	for i, ver := range alasVersions {
+	for i, repo := range alasRepos {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
 
-		entries, err := f.fetchVersion(ctx, ver.name, ver.feedURL)
+		entries, err := f.fetchFromRepo(ctx, repo.name, repo.url)
 		if err != nil {
-			// If feed doesn't exist or format is different, skip.
+			// Try direct updateinfo URL as fallback.
 			continue
 		}
 		allEntries = append(allEntries, entries...)
 
 		if progressFn != nil {
-			progressFn(i+1, len(alasVersions))
+			progressFn(i+1, len(alasRepos))
 		}
 	}
 
@@ -86,13 +104,116 @@ func (f *ALASFetcher) FetchAll(ctx context.Context, progressFn func(fetched, tot
 }
 
 func (f *ALASFetcher) FetchRecent(ctx context.Context, days int, progressFn func(fetched, total int)) ([]DBEntry, error) {
-	// ALAS doesn't support incremental; fetch all.
 	return f.FetchAll(ctx, progressFn)
 }
 
-func (f *ALASFetcher) fetchVersion(ctx context.Context, version, feedPath string) ([]DBEntry, error) {
-	url := f.BaseURL + feedPath
+func (f *ALASFetcher) fetchFromRepo(ctx context.Context, repoName, mirrorListURL string) ([]DBEntry, error) {
+	// Step 1: Get mirror list to find the base URL.
+	baseURL, err := f.getMirrorBase(ctx, mirrorListURL)
+	if err != nil {
+		return nil, fmt.Errorf("getting mirror for %s: %w", repoName, err)
+	}
 
+	// Step 2: Fetch repomd.xml to find updateinfo location.
+	updateInfoURL, err := f.findUpdateInfoURL(ctx, baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("finding updateinfo for %s: %w", repoName, err)
+	}
+
+	// Step 3: Download and parse updateinfo.xml.gz.
+	updates, err := f.fetchUpdateInfo(ctx, updateInfoURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetching updateinfo for %s: %w", repoName, err)
+	}
+
+	// Step 4: Transform to DBEntry.
+	var entries []DBEntry
+	for _, u := range updates.Updates {
+		if u.Type != "security" {
+			continue
+		}
+		entries = append(entries, transformALASUpdate(u)...)
+	}
+
+	return entries, nil
+}
+
+func (f *ALASFetcher) getMirrorBase(ctx context.Context, mirrorListURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mirrorListURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := f.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// Mirror list contains one URL per line; use the first.
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && strings.HasPrefix(line, "http") {
+			return strings.TrimRight(line, "/"), nil
+		}
+	}
+
+	return "", fmt.Errorf("no mirror URL found in %s", mirrorListURL)
+}
+
+// repomd is the XML structure of repodata/repomd.xml.
+type repomd struct {
+	Data []repomdData `xml:"data"`
+}
+
+type repomdData struct {
+	Type     string         `xml:"type,attr"`
+	Location repomdLocation `xml:"location"`
+}
+
+type repomdLocation struct {
+	Href string `xml:"href,attr"`
+}
+
+func (f *ALASFetcher) findUpdateInfoURL(ctx context.Context, baseURL string) (string, error) {
+	repomdURL := baseURL + "/repodata/repomd.xml"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, repomdURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := f.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("repomd.xml returned %d", resp.StatusCode)
+	}
+
+	var md repomd
+	if err := xml.NewDecoder(resp.Body).Decode(&md); err != nil {
+		return "", fmt.Errorf("parsing repomd.xml: %w", err)
+	}
+
+	for _, d := range md.Data {
+		if d.Type == "updateinfo" {
+			return baseURL + "/" + d.Location.Href, nil
+		}
+	}
+
+	return "", fmt.Errorf("no updateinfo found in repomd.xml")
+}
+
+func (f *ALASFetcher) fetchUpdateInfo(ctx context.Context, url string) (*updateInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -105,27 +226,32 @@ func (f *ALASFetcher) fetchVersion(ctx context.Context, version, feedPath string
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ALAS API returned status %d for %s: %s", resp.StatusCode, version, string(body))
+		return nil, fmt.Errorf("updateinfo returned %d", resp.StatusCode)
 	}
 
-	var feed alasFeed
-	if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
-		return nil, fmt.Errorf("decoding ALAS feed for %s: %w", version, err)
+	var reader io.Reader = resp.Body
+	// updateinfo is typically gzip-compressed.
+	if strings.HasSuffix(url, ".gz") {
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing updateinfo: %w", err)
+		}
+		defer func() { _ = gz.Close() }()
+		reader = gz
 	}
 
-	var entries []DBEntry
-	for _, adv := range feed.Advisories {
-		entries = append(entries, f.transformAdvisory(adv, version)...)
+	var info updateInfo
+	if err := xml.NewDecoder(reader).Decode(&info); err != nil {
+		return nil, fmt.Errorf("parsing updateinfo XML: %w", err)
 	}
 
-	return entries, nil
+	return &info, nil
 }
 
-func (f *ALASFetcher) transformAdvisory(adv alasAdvisory, version string) []DBEntry {
+func transformALASUpdate(u updateInfoUpdate) []DBEntry {
 	var entries []DBEntry
 
-	severity := strings.ToUpper(adv.Severity)
+	severity := strings.ToUpper(u.Severity)
 	switch severity {
 	case "IMPORTANT":
 		severity = "HIGH"
@@ -133,36 +259,47 @@ func (f *ALASFetcher) transformAdvisory(adv alasAdvisory, version string) []DBEn
 		severity = "MEDIUM"
 	}
 
-	description := adv.Description
+	description := u.Description
 	if len(description) > 500 {
 		description = description[:500] + "..."
 	}
 
-	// Create one entry per CVE per package.
-	cves := adv.CVEs
+	// Collect CVE IDs from references.
+	var cves []string
+	var refs []string
+	for _, r := range u.References.Refs {
+		if r.Href != "" {
+			refs = append(refs, r.Href)
+		}
+		if r.Type == "cve" {
+			cves = append(cves, r.ID)
+		}
+	}
 	if len(cves) == 0 {
-		cves = []string{adv.ID}
+		cves = []string{u.ID}
 	}
 
-	for _, pkg := range adv.Packages {
-		fixedVersion := pkg.Version
-		if pkg.Release != "" {
-			fixedVersion += "-" + pkg.Release
-		}
+	for _, col := range u.Packages.Collections {
+		for _, pkg := range col.Packages {
+			fixedVersion := pkg.Version
+			if pkg.Release != "" {
+				fixedVersion += "-" + pkg.Release
+			}
 
-		for _, cve := range cves {
-			entries = append(entries, DBEntry{
-				ID:               cve,
-				Severity:         severity,
-				Ecosystem:        "amazonlinux",
-				Package:          pkg.Name,
-				AffectedVersions: "<" + fixedVersion,
-				FixedIn:          fixedVersion,
-				Title:            adv.Title,
-				Description:      description,
-				References:       adv.References,
-				Source:           string(SourceALAS),
-			})
+			for _, cve := range cves {
+				entries = append(entries, DBEntry{
+					ID:               cve,
+					Severity:         severity,
+					Ecosystem:        "amazonlinux",
+					Package:          pkg.Name,
+					AffectedVersions: "<" + fixedVersion,
+					FixedIn:          fixedVersion,
+					Title:            u.Title,
+					Description:      description,
+					References:       refs,
+					Source:           string(SourceALAS),
+				})
+			}
 		}
 	}
 
