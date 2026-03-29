@@ -30,12 +30,12 @@ func NewRedHatFetcher() *RedHatFetcher {
 func (f *RedHatFetcher) Name() SourceName { return SourceRedHat }
 
 type redhatCVEListItem struct {
-	CVE             string  `json:"CVE"`
-	Severity        string  `json:"severity"`
-	PublicDate      string  `json:"public_date"`
-	BugzillaDesc    string  `json:"bugzilla_description"`
-	ResourceURL     string  `json:"resource_url"`
-	CvssScore       float64 `json:"cvss3_score"`
+	CVE             string      `json:"CVE"`
+	Severity        string      `json:"severity"`
+	PublicDate      string      `json:"public_date"`
+	BugzillaDesc    string      `json:"bugzilla_description"`
+	ResourceURL     string      `json:"resource_url"`
+	CvssScore       json.Number `json:"cvss3_score"`
 }
 
 func (f *RedHatFetcher) FetchAll(ctx context.Context, progressFn func(fetched, total int)) ([]DBEntry, error) {

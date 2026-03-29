@@ -68,7 +68,7 @@ var ubuntuActiveReleases = map[string]bool{
 func (f *UbuntuFetcher) FetchAll(ctx context.Context, progressFn func(fetched, total int)) ([]DBEntry, error) {
 	var allEntries []DBEntry
 	offset := 0
-	limit := 100
+	limit := 20
 
 	for {
 		select {
