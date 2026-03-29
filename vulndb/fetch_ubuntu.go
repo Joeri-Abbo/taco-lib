@@ -88,8 +88,10 @@ func (f *UbuntuFetcher) FetchAll(ctx context.Context, progressFn func(fetched, t
 			progressFn(len(allEntries), total)
 		}
 
-		// Stop when the API returns an empty page or we've passed the total.
-		if rawCount == 0 || offset+limit >= total {
+		// Stop when the API returns fewer results than requested (last page)
+		// or an empty page. We can't rely on total_results as the API
+		// reports an inaccurate count.
+		if rawCount < limit {
 			break
 		}
 
