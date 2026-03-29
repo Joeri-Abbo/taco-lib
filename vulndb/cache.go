@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -112,6 +113,81 @@ func (c *Cache) WriteMeta(meta *CacheMeta) error {
 	}
 
 	return os.WriteFile(c.MetaPath(), data, 0644)
+}
+
+// SourceDBPath returns the path to a per-source database file.
+func (c *Cache) SourceDBPath(source SourceName) string {
+	return filepath.Join(c.Dir, "sources", string(source)+".json")
+}
+
+// SourcesDir returns the path to the sources directory.
+func (c *Cache) SourcesDir() string {
+	return filepath.Join(c.Dir, "sources")
+}
+
+// WriteSourceDB writes entries for a single source to its own file.
+func (c *Cache) WriteSourceDB(source SourceName, entries []DBEntry) error {
+	dir := c.SourcesDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating sources directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling source %s: %w", source, err)
+	}
+
+	path := c.SourceDBPath(source)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("writing source %s: %w", source, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("renaming source %s: %w", source, err)
+	}
+
+	return nil
+}
+
+// ReadSourceDB reads entries for a single source from its file.
+func (c *Cache) ReadSourceDB(source SourceName) ([]DBEntry, error) {
+	data, err := os.ReadFile(c.SourceDBPath(source))
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []DBEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parsing source %s: %w", source, err)
+	}
+
+	return entries, nil
+}
+
+// ReadAllSourceDBs reads all per-source files and returns them keyed by source name.
+func (c *Cache) ReadAllSourceDBs() (map[SourceName][]DBEntry, error) {
+	result := make(map[SourceName][]DBEntry)
+
+	dir := c.SourcesDir()
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return result, nil // no sources dir yet
+	}
+
+	for _, de := range dirEntries {
+		if de.IsDir() || filepath.Ext(de.Name()) != ".json" {
+			continue
+		}
+		name := strings.TrimSuffix(de.Name(), ".json")
+		entries, err := c.ReadSourceDB(SourceName(name))
+		if err != nil {
+			continue
+		}
+		result[SourceName(name)] = entries
+	}
+
+	return result, nil
 }
 
 // WriteDB writes vulnerability entries to the cache atomically (write to temp, then rename).

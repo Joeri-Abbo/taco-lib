@@ -509,48 +509,28 @@ func UpdateMultiSource(ctx context.Context, cache *Cache, sources []SourceFetche
 		sourceEntries[r.name] = r.entries
 	}
 
-	// Merge with existing cache if present.
-	// Existing entries are added only for sources that were NOT freshly fetched,
-	// so fresh data always takes priority over stale cached data.
-	if cache.Exists() {
-		existingDB, loadErr := NewFromFile(cache.DBPath())
-		if loadErr == nil {
-			existing := existingDB.(*jsonDB)
-			for _, e := range existing.entries {
-				src := SourceName(e.Source)
-				if src == "" {
-					src = SourceNVD // legacy entries without source field
-				}
-				// Only keep cached entries for sources we didn't just fetch.
-				// For sources we did fetch, the fresh data replaces the cache.
-				if _, fetched := sourceEntries[src]; !fetched {
-					sourceEntries[src] = append(sourceEntries[src], e)
-				}
-			}
-			_ = existingDB.Close()
-
-			// For sources we did fetch fresh: merge fresh entries with cached
-			// entries from the SAME source so we don't lose old CVEs not in
-			// the recent window. Load cached per-source entries and let the
-			// fresh ones overwrite by key.
-			cachedBySource := make(map[SourceName][]DBEntry)
-			for _, e := range existing.entries {
-				src := SourceName(e.Source)
-				if src == "" {
-					src = SourceNVD
-				}
-				cachedBySource[src] = append(cachedBySource[src], e)
-			}
-			for src, freshEntries := range sourceEntries {
-				if cached, ok := cachedBySource[src]; ok {
-					// Put cached first, then fresh on top so fresh wins in mergeEntries.
-					sourceEntries[src] = mergeEntries(cached, freshEntries)
-				}
-			}
+	// Merge fresh entries with cached per-source files.
+	// For sources we just fetched: merge fresh on top of cached (fresh wins).
+	// For sources we didn't fetch: load from per-source cache files as-is.
+	cachedSources, _ := cache.ReadAllSourceDBs()
+	for src, cached := range cachedSources {
+		if _, fetched := sourceEntries[src]; fetched {
+			// Merge: cached first, fresh on top so fresh wins by key.
+			sourceEntries[src] = mergeEntries(cached, sourceEntries[src])
+		} else {
+			// Not fetched this run — keep previous data.
+			sourceEntries[src] = cached
 		}
 	}
 
-	// Merge all sources with precedence.
+	// Write each source to its own file.
+	for src, entries := range sourceEntries {
+		if err := cache.WriteSourceDB(src, entries); err != nil {
+			return fmt.Errorf("writing source %s: %w", src, err)
+		}
+	}
+
+	// Merge all sources with precedence and write the combined DB.
 	merged := MergeMultiSource(sourceEntries)
 
 	if err := cache.WriteDB(merged); err != nil {
