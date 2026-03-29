@@ -53,8 +53,7 @@ func PushOCI(cache *Cache, ref string) error {
 		return fmt.Errorf("reading database: %w", err)
 	}
 
-	// Gzip the data and create a static layer (stream layers can't be
-	// used with mutate.ConfigFile because size/digest aren't known yet).
+	// Gzip the data and create a static layer with a standard OCI media type.
 	var gzBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzBuf)
 	if _, err := gz.Write(dbData); err != nil {
@@ -63,46 +62,26 @@ func PushOCI(cache *Cache, ref string) error {
 	if err := gz.Close(); err != nil {
 		return fmt.Errorf("closing gzip writer: %w", err)
 	}
-	layer := static.NewLayer(gzBuf.Bytes(), VulnDBMediaType)
+	layer := static.NewLayer(gzBuf.Bytes(), types.OCILayer)
 
 	// Build the image: empty base + DB layer.
 	img := mutate.MediaType(empty.Image, types.OCIManifestSchema1)
 
-	img, err = mutate.Append(img, mutate.Addendum{
-		Layer:     layer,
-		MediaType: VulnDBMediaType,
-	})
+	img, err = mutate.AppendLayers(img, layer)
 	if err != nil {
 		return fmt.Errorf("appending layer: %w", err)
 	}
 
-	// Build config with our metadata.
+	// Embed metadata as annotations on the manifest.
 	meta, _ := cache.ReadMeta()
-	ociMeta := OCIMetadata{
-		SchemaVersion: 1,
-		LastUpdated:   time.Now(),
+	annotations := map[string]string{
+		"org.taco.vulndb.schema_version": "1",
 	}
 	if meta != nil {
-		ociMeta.EntryCount = meta.EntryCount
-		ociMeta.Sources = meta.Sources
-		ociMeta.LastUpdated = meta.LastUpdated
+		annotations["org.taco.vulndb.entry_count"] = fmt.Sprintf("%d", meta.EntryCount)
+		annotations["org.taco.vulndb.last_updated"] = meta.LastUpdated.UTC().Format(time.RFC3339)
 	}
-
-	// Embed metadata as annotations on the manifest since custom config
-	// media types require more ceremony. Use labels in the config.
-	configFile := &v1.ConfigFile{
-		Config: v1.Config{
-			Labels: map[string]string{
-				"org.taco.vulndb.schema_version": "1",
-				"org.taco.vulndb.entry_count":    fmt.Sprintf("%d", ociMeta.EntryCount),
-				"org.taco.vulndb.last_updated":   ociMeta.LastUpdated.UTC().Format(time.RFC3339),
-			},
-		},
-	}
-	img, err = mutate.ConfigFile(img, configFile)
-	if err != nil {
-		return fmt.Errorf("setting config: %w", err)
-	}
+	img = mutate.Annotations(img, annotations).(v1.Image)
 
 	// Push to registry with default auth (Docker config / GITHUB_TOKEN).
 	if err := remote.Write(tag, img, remote.WithAuthFromKeychain(authn.DefaultKeychain)); err != nil {
@@ -159,19 +138,19 @@ func PullOCI(cache *Cache, ref string) error {
 		return fmt.Errorf("writing to cache: %w", err)
 	}
 
-	// Extract metadata from config labels.
-	configFile, err := img.ConfigFile()
-	if err == nil && configFile != nil {
-		cacheMeta := &CacheMeta{
-			LastUpdated: time.Now(),
-			EntryCount:  len(entries),
-			SourceURL:   "oci://" + ref,
-		}
-		if t, parseErr := time.Parse(time.RFC3339, configFile.Config.Labels["org.taco.vulndb.last_updated"]); parseErr == nil {
+	// Extract metadata from manifest annotations.
+	cacheMeta := &CacheMeta{
+		LastUpdated: time.Now(),
+		EntryCount:  len(entries),
+		SourceURL:   "oci://" + ref,
+	}
+	manifest, err := img.Manifest()
+	if err == nil && manifest != nil {
+		if t, parseErr := time.Parse(time.RFC3339, manifest.Annotations["org.taco.vulndb.last_updated"]); parseErr == nil {
 			cacheMeta.LastUpdated = t
 		}
-		_ = cache.WriteMeta(cacheMeta)
 	}
+	_ = cache.WriteMeta(cacheMeta)
 
 	return nil
 }
