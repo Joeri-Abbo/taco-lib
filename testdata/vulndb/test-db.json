@@ -1,0 +1,90 @@
+[
+  {
+    "id": "CVE-2024-0001",
+    "severity": "CRITICAL",
+    "ecosystem": "npm",
+    "package": "lodash",
+    "affected_versions": "<4.17.21",
+    "fixed_in": "4.17.21",
+    "title": "Prototype Pollution in lodash",
+    "description": "Lodash versions prior to 4.17.21 are vulnerable to Prototype Pollution via the merge function.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0001"]
+  },
+  {
+    "id": "CVE-2024-0002",
+    "severity": "HIGH",
+    "ecosystem": "pip",
+    "package": "flask",
+    "affected_versions": ">=1.0.0,<2.3.3",
+    "fixed_in": "2.3.3",
+    "title": "Security bypass in Flask",
+    "description": "Flask versions before 2.3.3 contain a security bypass vulnerability.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0002"]
+  },
+  {
+    "id": "CVE-2024-0003",
+    "severity": "MEDIUM",
+    "ecosystem": "go",
+    "package": "golang.org/x/net",
+    "affected_versions": "<0.17.0",
+    "fixed_in": "0.17.0",
+    "title": "HTTP/2 rapid reset in x/net",
+    "description": "golang.org/x/net before 0.17.0 is vulnerable to HTTP/2 rapid reset attack.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0003"]
+  },
+  {
+    "id": "CVE-2024-0004",
+    "severity": "LOW",
+    "ecosystem": "npm",
+    "package": "express",
+    "affected_versions": ">=4.0.0,<4.18.2",
+    "fixed_in": "4.18.2",
+    "title": "Open redirect in Express",
+    "description": "Express before 4.18.2 is vulnerable to open redirect via URL parsing.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0004"]
+  },
+  {
+    "id": "CVE-2024-0005",
+    "severity": "CRITICAL",
+    "ecosystem": "debian",
+    "package": "openssl",
+    "affected_versions": "<3.0.12",
+    "fixed_in": "3.0.12",
+    "title": "Buffer overflow in OpenSSL",
+    "description": "OpenSSL before 3.0.12 contains a buffer overflow vulnerability.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0005"]
+  },
+  {
+    "id": "CVE-2024-0006",
+    "severity": "HIGH",
+    "ecosystem": "alpine",
+    "package": "curl",
+    "affected_versions": "<8.4.0",
+    "fixed_in": "8.4.0",
+    "title": "Cookie injection in curl",
+    "description": "curl before 8.4.0 is vulnerable to cookie injection.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0006"]
+  },
+  {
+    "id": "CVE-2024-0007",
+    "severity": "CRITICAL",
+    "ecosystem": "pip",
+    "package": "requests",
+    "affected_versions": "<2.31.0",
+    "fixed_in": "2.31.0",
+    "title": "Unintended credential exposure in Requests",
+    "description": "Requests before 2.31.0 may leak credentials when redirecting to a different host.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0007"]
+  },
+  {
+    "id": "CVE-2024-0008",
+    "severity": "HIGH",
+    "ecosystem": "go",
+    "package": "github.com/gin-gonic/gin",
+    "affected_versions": "<1.9.1",
+    "fixed_in": "1.9.1",
+    "title": "Denial of service in Gin",
+    "description": "Gin before 1.9.1 is vulnerable to a denial of service via crafted input.",
+    "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-0008"]
+  }
+]
