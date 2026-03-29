@@ -113,9 +113,9 @@ func (f *RedHatFetcher) fetchCVEListPage(ctx context.Context, url string) ([]red
 		return nil, err
 	}
 
-	resp, err := f.HTTPClient.Do(req)
+	resp, err := doWithRetry(f.HTTPClient, req, 3)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("red hat API: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

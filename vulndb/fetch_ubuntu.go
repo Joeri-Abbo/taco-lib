@@ -113,9 +113,9 @@ func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, i
 		return nil, 0, 0, err
 	}
 
-	resp, err := f.HTTPClient.Do(req)
+	resp, err := doWithRetry(f.HTTPClient, req, 3)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, fmt.Errorf("ubuntu CVE API: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

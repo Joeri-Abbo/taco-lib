@@ -149,9 +149,9 @@ func (f *GHSAFetcher) fetchPage(ctx context.Context, since, cursor string) (*ghs
 		req.Header.Set("Authorization", "Bearer "+f.Token)
 	}
 
-	resp, err := f.HTTPClient.Do(req)
+	resp, err := doWithRetry(f.HTTPClient, req, 3)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GitHub API: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

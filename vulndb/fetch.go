@@ -224,9 +224,9 @@ func (f *Fetcher) doRequest(ctx context.Context, reqURL string) (*nvdResponse, e
 		req.Header.Set("apiKey", f.APIKey)
 	}
 
-	resp, err := f.HTTPClient.Do(req)
+	resp, err := doWithRetry(f.HTTPClient, req, 3)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NVD API: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
