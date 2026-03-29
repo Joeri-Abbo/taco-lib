@@ -47,11 +47,37 @@ type ghsaAdvisory struct {
 }
 
 type ghsaVulnerability struct {
-	Package               ghsaPackage `json:"package"`
-	VulnerableVersionRange string     `json:"vulnerable_version_range"`
-	FirstPatchedVersion    *struct {
+	Package                ghsaPackage         `json:"package"`
+	VulnerableVersionRange string              `json:"vulnerable_version_range"`
+	FirstPatchedVersion    ghsaPatchedVersion  `json:"first_patched_version"`
+}
+
+// ghsaPatchedVersion handles GitHub's API returning either
+// {"identifier": "1.2.3"} or just "1.2.3" or null.
+type ghsaPatchedVersion struct {
+	Identifier string
+}
+
+func (v *ghsaPatchedVersion) UnmarshalJSON(data []byte) error {
+	// Try null.
+	if string(data) == "null" {
+		return nil
+	}
+	// Try string.
+	var s string
+	if json.Unmarshal(data, &s) == nil {
+		v.Identifier = s
+		return nil
+	}
+	// Try object.
+	var obj struct {
 		Identifier string `json:"identifier"`
-	} `json:"first_patched_version"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	v.Identifier = obj.Identifier
+	return nil
 }
 
 type ghsaPackage struct {
@@ -92,7 +118,6 @@ type ghsaPageResult struct {
 func (f *GHSAFetcher) fetch(ctx context.Context, since string, progressFn func(fetched, total int)) ([]DBEntry, error) {
 	var allEntries []DBEntry
 	cursor := ""
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -199,10 +224,7 @@ func (f *GHSAFetcher) transformAdvisory(adv ghsaAdvisory) []DBEntry {
 		}
 
 		constraint := ghsaConvertRange(vuln.VulnerableVersionRange)
-		fixedIn := ""
-		if vuln.FirstPatchedVersion != nil {
-			fixedIn = vuln.FirstPatchedVersion.Identifier
-		}
+		fixedIn := vuln.FirstPatchedVersion.Identifier
 
 		entries = append(entries, DBEntry{
 			ID:               id,
