@@ -78,7 +78,7 @@ func (f *UbuntuFetcher) FetchAll(ctx context.Context, progressFn func(fetched, t
 		}
 
 		url := fmt.Sprintf("%s?limit=%d&offset=%d", f.BaseURL, limit, offset)
-		entries, total, err := f.fetchPage(ctx, url)
+		entries, rawCount, total, err := f.fetchPage(ctx, url)
 		if err != nil {
 			return nil, err
 		}
@@ -88,11 +88,12 @@ func (f *UbuntuFetcher) FetchAll(ctx context.Context, progressFn func(fetched, t
 			progressFn(len(allEntries), total)
 		}
 
-		offset += limit
-		if offset >= total {
+		// Stop when the API returns an empty page or we've passed the total.
+		if rawCount == 0 || offset+limit >= total {
 			break
 		}
 
+		offset += limit
 		time.Sleep(200 * time.Millisecond) // rate limiting
 	}
 
@@ -104,26 +105,27 @@ func (f *UbuntuFetcher) FetchRecent(ctx context.Context, days int, progressFn fu
 	return f.FetchAll(ctx, progressFn)
 }
 
-func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, int, error) {
+// fetchPage returns (entries, rawCVECount, totalResults, error).
+func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, int, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
 	resp, err := f.HTTPClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, 0, fmt.Errorf("ubuntu CVE API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, 0, 0, fmt.Errorf("ubuntu CVE API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result ubuntuCVEResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, 0, fmt.Errorf("decoding Ubuntu CVE response: %w", err)
+		return nil, 0, 0, fmt.Errorf("decoding Ubuntu CVE response: %w", err)
 	}
 
 	var entries []DBEntry
@@ -131,7 +133,7 @@ func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, i
 		entries = append(entries, f.transformCVE(cve)...)
 	}
 
-	return entries, result.Total, nil
+	return entries, len(result.CVEs), result.Total, nil
 }
 
 func (f *UbuntuFetcher) transformCVE(cve ubuntuCVE) []DBEntry {
