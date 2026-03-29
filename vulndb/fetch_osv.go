@@ -139,12 +139,9 @@ func (f *OSVFetcher) FetchRecent(ctx context.Context, days int, progressFn func(
 
 	// Filter by modified date.
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
-	var recent []DBEntry
-	for _, e := range allEntries {
-		// We don't store modified on DBEntry, so return all for now.
-		// The merge will handle dedup.
-		recent = append(recent, e)
-	}
+	// We don't store modified on DBEntry, so return all for now.
+	// The merge will handle dedup.
+	recent := append([]DBEntry{}, allEntries...)
 	_ = cutoff // TODO: filter when modified date is tracked
 	return recent, nil
 }
