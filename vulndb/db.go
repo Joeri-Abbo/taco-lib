@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabbo/taco-lib/types"
+	"github.com/Joeri-Abbo/taco-lib/types"
 )
 
 // DBEntry is the on-disk format for a vulnerability record in the JSON database.

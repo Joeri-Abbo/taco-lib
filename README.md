@@ -11,7 +11,7 @@ Shared Go library for the TACO vulnerability scanner ecosystem.
 
 ```go
 import (
-    "github.com/jabbo/taco-lib/types"
-    "github.com/jabbo/taco-lib/vulndb"
+    "github.com/Joeri-Abbo/taco-lib/types"
+    "github.com/Joeri-Abbo/taco-lib/vulndb"
 )
 ```

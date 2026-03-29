@@ -1,4 +1,4 @@
-module github.com/jabbo/taco-lib
+module github.com/Joeri-Abbo/taco-lib
 
 go 1.25.7
 
