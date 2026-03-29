@@ -2,6 +2,7 @@ package vulndb
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/stream"
+	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
@@ -52,8 +53,17 @@ func PushOCI(cache *Cache, ref string) error {
 		return fmt.Errorf("reading database: %w", err)
 	}
 
-	// Create a gzipped stream layer from the DB data.
-	layer := stream.NewLayer(io.NopCloser(bytes.NewReader(dbData)))
+	// Gzip the data and create a static layer (stream layers can't be
+	// used with mutate.ConfigFile because size/digest aren't known yet).
+	var gzBuf bytes.Buffer
+	gz := gzip.NewWriter(&gzBuf)
+	if _, err := gz.Write(dbData); err != nil {
+		return fmt.Errorf("compressing layer: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("closing gzip writer: %w", err)
+	}
+	layer := static.NewLayer(gzBuf.Bytes(), VulnDBMediaType)
 
 	// Build the image: empty base + DB layer.
 	img := mutate.MediaType(empty.Image, types.OCIManifestSchema1)
