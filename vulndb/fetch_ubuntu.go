@@ -68,13 +68,14 @@ var ubuntuActiveReleases = map[string]bool{
 }
 
 func (f *UbuntuFetcher) FetchAll(ctx context.Context, progressFn func(fetched, total int)) ([]DBEntry, error) {
-	return f.fetchPaginated(ctx, "", progressFn)
+	return f.fetchPaginated(ctx, "", progressFn, 0)
 }
 
 // ubuntuConcurrency controls how many concurrent page requests we make.
 const ubuntuConcurrency = 10
 
-func (f *UbuntuFetcher) fetchPaginated(ctx context.Context, extraQuery string, progressFn func(fetched, total int)) ([]DBEntry, error) {
+// fetchPaginated fetches pages concurrently. If maxOffset > 0, only fetch up to that offset.
+func (f *UbuntuFetcher) fetchPaginated(ctx context.Context, extraQuery string, progressFn func(fetched, total int), maxOffset int) ([]DBEntry, error) {
 	limit := 20
 
 	// First request to discover total count.
@@ -83,16 +84,22 @@ func (f *UbuntuFetcher) fetchPaginated(ctx context.Context, extraQuery string, p
 	if err != nil {
 		return nil, err
 	}
-	if progressFn != nil {
-		progressFn(rawCount, total)
+
+	upperBound := total
+	if maxOffset > 0 && maxOffset < total {
+		upperBound = maxOffset
 	}
-	if rawCount < limit || total <= limit {
+
+	if progressFn != nil {
+		progressFn(rawCount, upperBound)
+	}
+	if rawCount < limit || upperBound <= limit {
 		return firstEntries, nil
 	}
 
 	// Build list of remaining offsets.
 	var offsets []int
-	for o := limit; o < total; o += limit {
+	for o := limit; o < upperBound; o += limit {
 		offsets = append(offsets, o)
 	}
 
@@ -141,7 +148,7 @@ func (f *UbuntuFetcher) fetchPaginated(ctx context.Context, extraQuery string, p
 		allEntries = append(allEntries, r.entries...)
 		fetched += len(r.entries)
 		if progressFn != nil {
-			progressFn(fetched, total)
+			progressFn(fetched, upperBound)
 		}
 	}
 
@@ -150,46 +157,53 @@ func (f *UbuntuFetcher) fetchPaginated(ctx context.Context, extraQuery string, p
 
 func (f *UbuntuFetcher) FetchRecent(ctx context.Context, days int, progressFn func(fetched, total int)) ([]DBEntry, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
-	var allEntries []DBEntry
-	offset := 0
 	limit := 20
+	sortQuery := "&sort_by=updated&order=descending"
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		url := fmt.Sprintf("%s?limit=%d&offset=%d&sort_by=updated&order=descending", f.BaseURL, limit, offset)
-		raw, entries, rawCount, total, err := f.fetchPageRaw(ctx, url)
-		if err != nil {
-			return nil, err
-		}
-
-		allEntries = append(allEntries, entries...)
-		if progressFn != nil {
-			progressFn(len(allEntries), total)
-		}
-
-		// Check if the oldest CVE on this page is before our cutoff.
-		pastCutoff := false
-		for _, cve := range raw {
-			if cve.UpdatedAt.Before(cutoff) {
-				pastCutoff = true
-				break
-			}
-		}
-
-		if pastCutoff || rawCount < limit {
-			break
-		}
-
-		offset += limit
-		time.Sleep(200 * time.Millisecond)
+	// Probe first page to get total count.
+	firstURL := fmt.Sprintf("%s?limit=%d&offset=0%s", f.BaseURL, limit, sortQuery)
+	_, _, _, total, err := f.fetchPageRaw(ctx, firstURL)
+	if err != nil {
+		return nil, err
 	}
 
-	return allEntries, nil
+	// Binary search for the offset where updated_at drops below the cutoff.
+	maxOffset := f.findCutoffOffset(ctx, cutoff, total, limit, sortQuery)
+
+	// Now concurrently fetch all pages from 0 to maxOffset (sorted by updated desc).
+	return f.fetchPaginated(ctx, sortQuery, progressFn, maxOffset)
+}
+
+// findCutoffOffset uses binary search to find the approximate offset where
+// CVE updated_at dates drop below the cutoff. Returns the upper bound offset.
+func (f *UbuntuFetcher) findCutoffOffset(ctx context.Context, cutoff time.Time, total, limit int, sortQuery string) int {
+	lo, hi := 0, total
+	for lo < hi {
+		mid := (lo + hi) / 2
+		// Round to page boundary.
+		mid = (mid / limit) * limit
+
+		url := fmt.Sprintf("%s?limit=%d&offset=%d%s", f.BaseURL, limit, mid, sortQuery)
+		raw, _, _, _, err := f.fetchPageRaw(ctx, url)
+		if err != nil || len(raw) == 0 {
+			hi = mid
+			continue
+		}
+
+		// Check the last CVE on this page (oldest on this page since sorted desc).
+		lastCVE := raw[len(raw)-1]
+		if lastCVE.UpdatedAt.Before(cutoff) {
+			hi = mid
+		} else {
+			lo = mid + limit
+		}
+	}
+	// Add one extra page as buffer for boundary edge cases.
+	result := lo + limit
+	if result > total {
+		result = total
+	}
+	return result
 }
 
 func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, int, int, error) {
