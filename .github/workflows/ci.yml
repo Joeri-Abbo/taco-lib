@@ -11,10 +11,10 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       matrix:
-        go-version: ['1.25.x', '1.26.x']
+        go-version: ["1.25.x", "1.26.x"]
 
     steps:
       - uses: actions/checkout@v6
@@ -37,13 +37,13 @@ jobs:
           path: coverage.out
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: "1.26.x"
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
