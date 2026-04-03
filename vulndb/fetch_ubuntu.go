@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,7 @@ type ubuntuCVE struct {
 	ID          string                `json:"id"`
 	Description string                `json:"description"`
 	Priority    string                `json:"priority"`
+	UpdatedAt   time.Time             `json:"updated_at"`
 	Packages    []ubuntuPackageStatus `json:"packages"`
 	References  []string              `json:"references"`
 }
@@ -66,67 +68,170 @@ var ubuntuActiveReleases = map[string]bool{
 }
 
 func (f *UbuntuFetcher) FetchAll(ctx context.Context, progressFn func(fetched, total int)) ([]DBEntry, error) {
-	var allEntries []DBEntry
-	offset := 0
+	return f.fetchPaginated(ctx, "", progressFn, 0)
+}
+
+// ubuntuConcurrency controls how many concurrent page requests we make.
+const ubuntuConcurrency = 10
+
+// fetchPaginated fetches pages concurrently. If maxOffset > 0, only fetch up to that offset.
+func (f *UbuntuFetcher) fetchPaginated(ctx context.Context, extraQuery string, progressFn func(fetched, total int), maxOffset int) ([]DBEntry, error) {
 	limit := 20
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
+	// First request to discover total count.
+	firstURL := fmt.Sprintf("%s?limit=%d&offset=0%s", f.BaseURL, limit, extraQuery)
+	firstEntries, rawCount, total, err := f.fetchPage(ctx, firstURL)
+	if err != nil {
+		return nil, err
+	}
 
-		url := fmt.Sprintf("%s?limit=%d&offset=%d", f.BaseURL, limit, offset)
-		entries, rawCount, total, err := f.fetchPage(ctx, url)
-		if err != nil {
-			return nil, err
-		}
+	upperBound := total
+	if maxOffset > 0 && maxOffset < total {
+		upperBound = maxOffset
+	}
 
-		allEntries = append(allEntries, entries...)
+	if progressFn != nil {
+		progressFn(rawCount, upperBound)
+	}
+	if rawCount < limit || upperBound <= limit {
+		return firstEntries, nil
+	}
+
+	// Build list of remaining offsets.
+	var offsets []int
+	for o := limit; o < upperBound; o += limit {
+		offsets = append(offsets, o)
+	}
+
+	// Fetch remaining pages concurrently.
+	type pageResult struct {
+		offset  int
+		entries []DBEntry
+		err     error
+	}
+
+	resultsCh := make(chan pageResult, len(offsets))
+	sem := make(chan struct{}, ubuntuConcurrency)
+
+	var wg sync.WaitGroup
+	for _, o := range offsets {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			select {
+			case <-ctx.Done():
+				resultsCh <- pageResult{offset: offset, err: ctx.Err()}
+				return
+			default:
+			}
+
+			url := fmt.Sprintf("%s?limit=%d&offset=%d%s", f.BaseURL, limit, offset, extraQuery)
+			entries, _, _, fetchErr := f.fetchPage(ctx, url)
+			resultsCh <- pageResult{offset: offset, entries: entries, err: fetchErr}
+		}(o)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	allEntries := firstEntries
+	fetched := rawCount
+	for r := range resultsCh {
+		if r.err != nil {
+			return nil, fmt.Errorf("fetching offset %d: %w", r.offset, r.err)
+		}
+		allEntries = append(allEntries, r.entries...)
+		fetched += len(r.entries)
 		if progressFn != nil {
-			progressFn(offset+rawCount, total)
+			progressFn(fetched, upperBound)
 		}
-
-		// Stop when the API returns fewer results than requested (last page)
-		// or an empty page.
-		if rawCount < limit {
-			break
-		}
-
-		offset += limit
-		time.Sleep(200 * time.Millisecond) // rate limiting
 	}
 
 	return allEntries, nil
 }
 
 func (f *UbuntuFetcher) FetchRecent(ctx context.Context, days int, progressFn func(fetched, total int)) ([]DBEntry, error) {
-	// Ubuntu API doesn't easily support date-based filtering; fetch all.
-	return f.FetchAll(ctx, progressFn)
+	cutoff := time.Now().AddDate(0, 0, -days)
+	limit := 20
+	sortQuery := "&sort_by=updated&order=descending"
+
+	// Probe first page to get total count.
+	firstURL := fmt.Sprintf("%s?limit=%d&offset=0%s", f.BaseURL, limit, sortQuery)
+	_, _, _, total, err := f.fetchPageRaw(ctx, firstURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Binary search for the offset where updated_at drops below the cutoff.
+	maxOffset := f.findCutoffOffset(ctx, cutoff, total, limit, sortQuery)
+
+	// Now concurrently fetch all pages from 0 to maxOffset (sorted by updated desc).
+	return f.fetchPaginated(ctx, sortQuery, progressFn, maxOffset)
 }
 
-// fetchPage returns (entries, rawCVECount, totalResults, error).
+// findCutoffOffset uses binary search to find the approximate offset where
+// CVE updated_at dates drop below the cutoff. Returns the upper bound offset.
+func (f *UbuntuFetcher) findCutoffOffset(ctx context.Context, cutoff time.Time, total, limit int, sortQuery string) int {
+	lo, hi := 0, total
+	for lo < hi {
+		mid := (lo + hi) / 2
+		// Round to page boundary.
+		mid = (mid / limit) * limit
+
+		url := fmt.Sprintf("%s?limit=%d&offset=%d%s", f.BaseURL, limit, mid, sortQuery)
+		raw, _, _, _, err := f.fetchPageRaw(ctx, url)
+		if err != nil || len(raw) == 0 {
+			hi = mid
+			continue
+		}
+
+		// Check the last CVE on this page (oldest on this page since sorted desc).
+		lastCVE := raw[len(raw)-1]
+		if lastCVE.UpdatedAt.Before(cutoff) {
+			hi = mid
+		} else {
+			lo = mid + limit
+		}
+	}
+	// Add one extra page as buffer for boundary edge cases.
+	result := lo + limit
+	if result > total {
+		result = total
+	}
+	return result
+}
+
 func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, int, int, error) {
+	_, entries, count, total, err := f.fetchPageRaw(ctx, url)
+	return entries, count, total, err
+}
+
+// fetchPageRaw returns (rawCVEs, entries, rawCVECount, totalResults, error).
+func (f *UbuntuFetcher) fetchPageRaw(ctx context.Context, url string) ([]ubuntuCVE, []DBEntry, int, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, nil, 0, 0, err
 	}
 
 	resp, err := doWithRetry(f.HTTPClient, req, 3)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("ubuntu CVE API: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("ubuntu CVE API: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, 0, 0, fmt.Errorf("ubuntu CVE API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, 0, 0, fmt.Errorf("ubuntu CVE API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result ubuntuCVEResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, 0, 0, fmt.Errorf("decoding Ubuntu CVE response: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("decoding Ubuntu CVE response: %w", err)
 	}
 
 	var entries []DBEntry
@@ -134,7 +239,7 @@ func (f *UbuntuFetcher) fetchPage(ctx context.Context, url string) ([]DBEntry, i
 		entries = append(entries, f.transformCVE(cve)...)
 	}
 
-	return entries, len(result.CVEs), result.Total, nil
+	return result.CVEs, entries, len(result.CVEs), result.Total, nil
 }
 
 func (f *UbuntuFetcher) transformCVE(cve ubuntuCVE) []DBEntry {
