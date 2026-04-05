@@ -62,6 +62,9 @@ func MergeMultiSource(sourceEntries map[SourceName][]DBEntry) []DBEntry {
 				if len(merged.References) == 0 {
 					merged.References = existing.References
 				}
+				if merged.CvssScore == 0 {
+					merged.CvssScore = existing.CvssScore
+				}
 				best[k] = merged
 				bestPriority[k] = priority
 			} else {
@@ -80,6 +83,9 @@ func MergeMultiSource(sourceEntries map[SourceName][]DBEntry) []DBEntry {
 				}
 				if len(existing.References) == 0 {
 					existing.References = e.References
+				}
+				if existing.CvssScore == 0 {
+					existing.CvssScore = e.CvssScore
 				}
 				best[k] = existing
 			}

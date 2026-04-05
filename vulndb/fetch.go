@@ -248,6 +248,7 @@ func (f *Fetcher) transformEntries(vulns []nvdVulnItem) []DBEntry {
 
 	for _, v := range vulns {
 		severity := extractSeverity(v.CVE.Metrics)
+		cvssScore := extractCvssScore(v.CVE.Metrics)
 		title := extractDescription(v.CVE.Descriptions, 120)
 		description := extractDescription(v.CVE.Descriptions, 0)
 		refs := extractReferences(v.CVE.References)
@@ -271,6 +272,7 @@ func (f *Fetcher) transformEntries(vulns []nvdVulnItem) []DBEntry {
 					entries = append(entries, DBEntry{
 						ID:               v.CVE.ID,
 						Severity:         severity,
+						CvssScore:        cvssScore,
 						Ecosystem:        ecosystem,
 						Package:          pkg,
 						AffectedVersions: constraint,
@@ -299,6 +301,19 @@ func extractSeverity(metrics nvdMetrics) string {
 		return strings.ToUpper(metrics.CvssMetricV2[0].BaseSeverity)
 	}
 	return "UNKNOWN"
+}
+
+func extractCvssScore(metrics nvdMetrics) float64 {
+	if len(metrics.CvssMetricV31) > 0 {
+		return metrics.CvssMetricV31[0].CVSSData.BaseScore
+	}
+	if len(metrics.CvssMetricV30) > 0 {
+		return metrics.CvssMetricV30[0].CVSSData.BaseScore
+	}
+	if len(metrics.CvssMetricV2) > 0 {
+		return metrics.CvssMetricV2[0].CVSSData.BaseScore
+	}
+	return 0
 }
 
 func extractDescription(descs []nvdDescription, maxLen int) string {

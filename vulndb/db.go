@@ -25,6 +25,7 @@ type DBEntry struct {
 	References       []string `json:"references,omitempty"`
 	Source           string   `json:"source,omitempty"`
 	KnownExploited   bool     `json:"known_exploited,omitempty"`
+	CvssScore        float64  `json:"cvss_score,omitempty"`
 }
 
 // DBMeta holds metadata about the vulnerability database.
