@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, taco-platform]
     strategy:
       matrix:
         go-version: ["1.25.x", "1.26.x"]
@@ -37,7 +37,7 @@ jobs:
           path: coverage.out
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, taco-platform]
     steps:
       - uses: actions/checkout@v6
 
